@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Social Group Labeler</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: 'Courier New', monospace;
+  background: #111;
+  color: #ddd;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Toolbar ── */
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+#toolbar button {
+  padding: 4px 12px;
+  background: #222;
+  color: #ccc;
+  border: 1px solid #555;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  border-radius: 3px;
+}
+#toolbar button:hover { background: #333; color: #fff; }
+#toolbar button.primary { border-color: #4caf50; color: #4caf50; }
+#toolbar button.primary:hover { background: #4caf50; color: #000; }
+
+#frame-label { font-size: 12px; color: #888; min-width: 180px; }
+#status-msg  { font-size: 12px; color: #aaa; margin-left: auto; }
+
+/* ── Main area ── */
+#main {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+#canvas-wrap {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10px;
+  background: #0a0a0a;
+}
+
+#canvas { cursor: crosshair; display: block; }
+
+/* ── Sidebar ── */
+#sidebar {
+  width: 210px;
+  min-width: 210px;
+  background: #161616;
+  border-left: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+#sidebar h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #666;
+  margin-bottom: 4px;
+}
+
+.group-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 3px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  font-size: 12px;
+}
+.group-row:hover { background: #222; }
+.group-row.active { border-color: #fff; background: #222; }
+
+.swatch {
+  width: 13px; height: 13px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+.g-count { margin-left: auto; color: #555; font-size: 11px; }
+
+#btn-new-group {
+  padding: 5px;
+  background: transparent;
+  border: 1px dashed #444;
+  color: #777;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  border-radius: 3px;
+  width: 100%;
+}
+#btn-new-group:hover { border-color: #aaa; color: #ccc; }
+
+#kbd-hint {
+  margin-top: auto;
+  font-size: 11px;
+  color: #444;
+  line-height: 1.8;
+  border-top: 1px solid #222;
+  padding-top: 8px;
+}
+
+/* ── Detection progress overlay ── */
+#det-overlay {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,.85);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  z-index: 100;
+  font-size: 14px;
+}
+#det-overlay.hidden { display: none; }
+
+#pbar-wrap { width: 320px; height: 6px; background: #333; border-radius: 3px; }
+#pbar { height: 100%; width: 0; background: #4caf50; border-radius: 3px; transition: width .3s; }
+
+#det-note { font-size: 11px; color: #555; }
+</style>
+</head>
+<body>
+
+<!-- Detection progress overlay -->
+<div id="det-overlay">
+  <div id="det-msg">Running SAM3 detection — please wait...</div>
+  <div id="pbar-wrap"><div id="pbar"></div></div>
+  <div id="det-progress">0 / 0 frames</div>
+  <div id="det-note">Results are cached. This only runs once per dataset.</div>
+</div>
+
+<!-- Toolbar -->
+<div id="toolbar">
+  <span id="frame-label">—</span>
+  <button onclick="prevFrame()" title="← or A">◀ Prev</button>
+  <button onclick="nextFrame()" title="→ or D">Next ▶</button>
+  <button onclick="newGroup()"  title="N">＋ New Group</button>
+  <button onclick="clearFrame()" title="C">Clear Frame</button>
+  <button onclick="saveAnnotations()" class="primary" title="S">Save</button>
+  <span id="status-msg"></span>
+</div>
+
+<!-- Main -->
+<div id="main">
+  <div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+  </div>
+  <div id="sidebar">
+    <h3>Groups</h3>
+    <div id="group-list"></div>
+    <button id="btn-new-group" onclick="newGroup()">＋ New Group  [N]</button>
+    <div id="kbd-hint">
+      Click person → assign group<br>
+      Click again → deassign<br><br>
+      <b>Keys</b><br>
+      ← / → &nbsp; prev / next<br>
+      N &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; new group<br>
+      1–9 &nbsp;&nbsp;&nbsp; select group<br>
+      C &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; clear frame<br>
+      S &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; save
+    </div>
+  </div>
+</div>
+
+<script>
+// ─── Palette ────────────────────────────────────────────────────────────────
+const PALETTE = [
+  '#757575', // 0 = unassigned (grey)
+  '#e53935', // 1 red
+  '#1e88e5', // 2 blue
+  '#43a047', // 3 green
+  '#fb8c00', // 4 orange
+  '#8e24aa', // 5 purple
+  '#00acc1', // 6 cyan
+  '#f4511e', // 7 deep-orange
+  '#e91e63', // 8 pink
+  '#00897b', // 9 teal
+  '#c0ca33', // 10 lime
+  '#6d4c41', // 11 brown
+  '#546e7a', // 12 blue-grey
+];
+
+function gColor(gid) {
+  if (!gid || gid <= 0) return PALETTE[0];
+  if (gid < PALETTE.length) return PALETTE[gid];
+  return `hsl(${(gid * 53) % 360},60%,52%)`;
+}
+
+// ─── App state ──────────────────────────────────────────────────────────────
+let frames      = [];   // sorted list of frame filenames
+let curIdx      = 0;    // current frame index
+let detections  = {};   // { frameName: [{person_id, bbox, mask?, confidence}] }
+let annotations = {};   // { frameName: [{person_id, bbox, mask?, group_id}] }
+let curGroup    = 1;    // active group being assigned
+let nextGroupId = 2;    // next fresh group id
+
+let scale   = 1;        // canvas ↔ image scale
+let curImg  = null;     // current HTMLImageElement
+
+const canvas   = document.getElementById('canvas');
+const ctx      = canvas.getContext('2d');
+const overlay  = document.getElementById('det-overlay');
+const statusEl = document.getElementById('status-msg');
+const labelEl  = document.getElementById('frame-label');
+
+// ─── Boot ───────────────────────────────────────────────────────────────────
+async function init() {
+  await pollDetection();
+
+  const [fRes, dRes, aRes] = await Promise.all([
+    fetch('/api/frames').then(r => r.json()),
+    fetch('/api/detections').then(r => r.json()),
+    fetch('/api/annotations').then(r => r.json()),
+  ]);
+
+  frames      = fRes.frames || [];
+  detections  = dRes;
+  annotations = aRes;
+
+  if (!frames.length) {
+    statusEl.textContent = 'No frames found. Check FRAMES_DIR.';
+    return;
+  }
+  await loadFrame(0);
+}
+
+async function pollDetection() {
+  while (true) {
+    const s = await fetch('/api/status').then(r => r.json());
+
+    if (s.state === 'done') {
+      overlay.classList.add('hidden');
+      return;
+    }
+    if (s.state === 'error') {
+      document.getElementById('det-msg').textContent = 'Detection error: ' + s.error;
+      return;
+    }
+    if (s.state === 'no_frames') {
+      document.getElementById('det-msg').textContent =
+        'No PNG frames found. Set FRAMES_DIR and restart.';
+      return;
+    }
+    if (s.state === 'running') {
+      overlay.classList.remove('hidden');
+      const prog = document.getElementById('det-progress');
+      prog.textContent = `${s.progress} / ${s.total} frames`;
+      const pct = s.total > 0 ? (s.progress / s.total) * 100 : 0;
+      document.getElementById('pbar').style.width = pct + '%';
+    }
+    await sleep(1000);
+  }
+}
+
+// ─── Frame loading ───────────────────────────────────────────────────────────
+async function loadFrame(idx) {
+  if (idx < 0 || idx >= frames.length) return;
+  curIdx = idx;
+  const name = frames[idx];
+  labelEl.textContent = `Frame ${idx + 1} / ${frames.length}   •   ${name}`;
+
+  curImg = await loadImage(`/api/frame/${encodeURIComponent(name)}`);
+
+  initAnnotations(name);
+  recalcNextGroupId();
+  drawFrame();
+  renderSidebar();
+}
+
+function loadImage(src) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload  = () => res(img);
+    img.onerror = rej;
+    img.src = src;
+  });
+}
+
+// ─── Annotation helpers ──────────────────────────────────────────────────────
+function initAnnotations(name) {
+  if (annotations[name]) return;
+
+  const dets = detections[name] || [];
+  annotations[name] = dets.map(d => ({
+    person_id: d.person_id,
+    bbox:      d.bbox,
+    mask:      d.mask || null,
+    group_id:  null,
+  }));
+
+  // Semi-automatic group propagation from previous frame
+  if (curIdx > 0) {
+    const prev = frames[curIdx - 1];
+    if (annotations[prev]) propagateFromPrev(name, prev);
+  }
+}
+
+function propagateFromPrev(name, prevName) {
+  const prevMap = {};
+  for (const p of annotations[prevName]) {
+    if (p.group_id !== null) prevMap[p.person_id] = p.group_id;
+  }
+  for (const p of annotations[name]) {
+    if (p.group_id === null && prevMap[p.person_id] !== undefined) {
+      p.group_id = prevMap[p.person_id];
+    }
+  }
+}
+
+function recalcNextGroupId() {
+  let max = 1;
+  for (const ps of Object.values(annotations)) {
+    for (const p of ps) {
+      if (p.group_id && p.group_id > max) max = p.group_id;
+    }
+  }
+  nextGroupId = max + 1;
+  // Make sure curGroup is still valid
+  if (curGroup >= nextGroupId) curGroup = Math.max(1, nextGroupId - 1);
+}
+
+// ─── Drawing ─────────────────────────────────────────────────────────────────
+function drawFrame() {
+  if (!curImg) return;
+
+  const wrap = document.getElementById('canvas-wrap');
+  const maxW  = wrap.clientWidth  - 20;
+  const maxH  = wrap.clientHeight - 20;
+  scale = Math.min(maxW / curImg.naturalWidth, maxH / curImg.naturalHeight, 1);
+
+  canvas.width  = Math.round(curImg.naturalWidth  * scale);
+  canvas.height = Math.round(curImg.naturalHeight * scale);
+
+  redraw();
+}
+
+function redraw() {
+  if (!curImg) return;
+  ctx.drawImage(curImg, 0, 0, canvas.width, canvas.height);
+
+  const persons = annotations[frames[curIdx]] || [];
+
+  for (const p of persons) {
+    const color = gColor(p.group_id);
+    const [bx, by, bw, bh] = p.bbox.map(v => Math.round(v * scale));
+
+    // Mask overlay
+    if (p.mask && p.mask.length > 2) {
+      ctx.globalAlpha = 0.30;
+      ctx.fillStyle   = color;
+      ctx.beginPath();
+      p.mask.forEach(([mx, my], i) => {
+        const sx = Math.round(mx * scale), sy = Math.round(my * scale);
+        if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+      });
+      ctx.closePath();
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // Bounding box
+    ctx.strokeStyle = color;
+    ctx.lineWidth   = p.group_id ? 2.5 : 1.5;
+    ctx.setLineDash(p.group_id ? [] : [5, 4]);
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.setLineDash([]);
+
+    // Label chip
+    const label   = p.group_id ? `G${p.group_id}` : '?';
+    const chipW   = label.length * 7 + 8;
+    const chipH   = 16;
+    const chipY   = by > chipH ? by - chipH : by + bh;
+
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle   = color;
+    ctx.fillRect(bx, chipY, chipW, chipH);
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = '#fff';
+    ctx.font      = 'bold 11px monospace';
+    ctx.fillText(label, bx + 4, chipY + chipH - 4);
+  }
+}
+
+// ─── Canvas click ────────────────────────────────────────────────────────────
+canvas.addEventListener('click', e => {
+  const rect = canvas.getBoundingClientRect();
+  const cx = (e.clientX - rect.left) * (canvas.width  / rect.width);
+  const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  const ix = cx / scale, iy = cy / scale;
+
+  const persons = annotations[frames[curIdx]] || [];
+  let best = null, bestArea = Infinity;
+
+  for (const p of persons) {
+    const [x, y, w, h] = p.bbox;
+    if (ix >= x && ix <= x + w && iy >= y && iy <= y + h) {
+      const area = w * h;
+      if (area < bestArea) { bestArea = area; best = p; }
+    }
+  }
+
+  if (!best) return;
+
+  if (best.group_id === curGroup) {
+    best.group_id = null;           // clicking same group deassigns
+  } else {
+    best.group_id = curGroup;
+    if (curGroup >= nextGroupId) nextGroupId = curGroup + 1;
+  }
+
+  redraw();
+  renderSidebar();
+});
+
+// ─── Controls ────────────────────────────────────────────────────────────────
+function prevFrame() { if (curIdx > 0) loadFrame(curIdx - 1); }
+function nextFrame() { if (curIdx < frames.length - 1) loadFrame(curIdx + 1); }
+
+function newGroup() {
+  curGroup = nextGroupId++;
+  renderSidebar();
+  flash(`New group G${curGroup}`);
+}
+
+function selectGroup(gid) {
+  curGroup = gid;
+  renderSidebar();
+}
+
+function clearFrame() {
+  const ps = annotations[frames[curIdx]];
+  if (ps) ps.forEach(p => { p.group_id = null; });
+  redraw();
+  renderSidebar();
+}
+
+async function saveAnnotations() {
+  // Build the export — bboxes + group assignments, no mask data
+  const out = {};
+  for (const [name, persons] of Object.entries(annotations)) {
+    out[name] = persons.map(p => ({
+      person_id: p.person_id,
+      bbox:      p.bbox,
+      group_id:  p.group_id,
+    }));
+  }
+
+  const res  = await fetch('/api/annotations', {
+    method:  'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body:    JSON.stringify({ annotations: out }),
+  });
+  const data = await res.json();
+  flash(`Saved → ${data.path || 'annotations.json'}`);
+}
+
+// ─── Sidebar ─────────────────────────────────────────────────────────────────
+function renderSidebar() {
+  const persons = annotations[frames[curIdx]] || [];
+
+  // Count persons per group in this frame
+  const counts = {};
+  for (const p of persons) {
+    const g = p.group_id ?? 0;
+    counts[g] = (counts[g] || 0) + 1;
+  }
+
+  // Gather all group IDs seen globally + curGroup
+  const allGids = new Set([curGroup]);
+  for (const ps of Object.values(annotations)) {
+    for (const p of ps) { if (p.group_id) allGids.add(p.group_id); }
+  }
+  const sorted = [...allGids].filter(g => g > 0).sort((a, b) => a - b);
+
+  const list = document.getElementById('group-list');
+  list.innerHTML = '';
+
+  for (const gid of sorted) {
+    const row = document.createElement('div');
+    row.className = 'group-row' + (gid === curGroup ? ' active' : '');
+    row.onclick = () => selectGroup(gid);
+
+    const sw = document.createElement('div');
+    sw.className = 'swatch';
+    sw.style.background = gColor(gid);
+
+    const lbl = document.createElement('span');
+    lbl.textContent = `Group ${gid}`;
+
+    const cnt = document.createElement('span');
+    cnt.className = 'g-count';
+    cnt.textContent = counts[gid] ? `${counts[gid]}p` : '';
+
+    row.append(sw, lbl, cnt);
+    list.appendChild(row);
+  }
+}
+
+// ─── Keyboard ────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  switch (e.key) {
+    case 'ArrowLeft':  case 'a': case 'A': prevFrame();  break;
+    case 'ArrowRight': case 'd': case 'D': nextFrame();  break;
+    case 'n': case 'N': newGroup();         break;
+    case 's': case 'S': saveAnnotations(); break;
+    case 'c': case 'C': clearFrame();      break;
+    default:
+      if (e.key >= '1' && e.key <= '9') selectGroup(parseInt(e.key));
+  }
+});
+
+window.addEventListener('resize', drawFrame);
+
+// ─── Utils ───────────────────────────────────────────────────────────────────
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function flash(msg) {
+  statusEl.textContent = msg;
+  setTimeout(() => { statusEl.textContent = ''; }, 3000);
+}
+
+// ─── Go ──────────────────────────────────────────────────────────────────────
+init().catch(err => {
+  statusEl.textContent = 'Error: ' + err.message;
+  console.error(err);
+});
+</script>
+</body>
+</html>
