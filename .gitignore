@@ -1,0 +1,18 @@
+# Data — too large for git
+bags/
+frames/*.png
+frames/*.jpg
+frames/*.jpeg
+output_frames/
+
+# Keep annotations and cache (small JSON files)
+!frames/annotations.json
+!frames/detections_cache.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# YOLO weights
+*.pt
