@@ -3,7 +3,8 @@
 Extract pairwise distance features from detections + annotations for training.
 
 Outputs a CSV with one row per (frame, person_i, person_j) pair:
-  frame, person_i, person_j, distance, delta_distance, same_group
+  frame, person_i, person_j, distance, delta_distance,
+  velocity_alignment, dist_std, proximity_streak, same_group
 
 Usage:
     python extract_features.py
@@ -14,7 +15,12 @@ import argparse
 import csv
 import json
 import math
+from collections import deque
 from pathlib import Path
+
+
+PROXIMITY_THRESHOLD = 200  # pixels
+WINDOW = 5                 # frames for rolling features
 
 
 def bbox_center(bbox):
@@ -24,6 +30,15 @@ def bbox_center(bbox):
 
 def distance(p1, p2):
     return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+
+def velocity_alignment(v1, v2):
+    """Cosine similarity of two velocity vectors. Returns 0 if either is zero."""
+    mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
+    mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
+    if mag1 == 0 or mag2 == 0:
+        return 0.0
+    return (v1[0] * v2[0] + v1[1] * v2[1]) / (mag1 * mag2)
 
 
 def extract(frames_dir: Path, output_path: Path):
@@ -40,11 +55,9 @@ def extract(frames_dir: Path, output_path: Path):
     with open(ann_file) as f:
         annotations = json.load(f)
 
-    # Only process frames that have been annotated
     frames = sorted(annotations.keys())
     print(f"Processing {len(frames)} annotated frames...")
 
-    # Build lookup: frame -> {person_id: {center, group_id}}
     def build_frame_data(frame_name):
         ann = {p["person_id"]: p["group_id"] for p in annotations.get(frame_name, [])}
         det = {p["person_id"]: p["bbox"]    for p in detections.get(frame_name, [])}
@@ -52,17 +65,29 @@ def extract(frames_dir: Path, output_path: Path):
         for pid, bbox in det.items():
             group = ann.get(pid)
             if group is None:
-                continue  # skip unlabeled persons
+                continue
             result[pid] = {"center": bbox_center(bbox), "group_id": group}
         return result
 
-    # prev_distances[frame_name][(i,j)] = distance, for computing delta
     prev_distances: dict[tuple, float] = {}
+    prev_centers: dict[int, tuple] = {}
+    dist_history: dict[tuple, deque] = {}
     rows = []
 
     for frame_name in frames:
         frame_data = build_frame_data(frame_name)
         pids = sorted(frame_data.keys())
+
+        # Compute per-person velocities
+        velocities = {}
+        for pid, data in frame_data.items():
+            cx, cy = data["center"]
+            if pid in prev_centers:
+                px, py = prev_centers[pid]
+                velocities[pid] = (cx - px, cy - py)
+            else:
+                velocities[pid] = (0.0, 0.0)
+            prev_centers[pid] = (cx, cy)
 
         for a, pid_i in enumerate(pids):
             for pid_j in pids[a + 1:]:
@@ -71,8 +96,22 @@ def extract(frames_dir: Path, output_path: Path):
 
                 dist = distance(di["center"], dj["center"])
                 pair = (min(pid_i, pid_j), max(pid_i, pid_j))
+
                 delta = dist - prev_distances[pair] if pair in prev_distances else 0.0
                 prev_distances[pair] = dist
+
+                vel_align = velocity_alignment(velocities[pid_i], velocities[pid_j])
+
+                if pair not in dist_history:
+                    dist_history[pair] = deque(maxlen=WINDOW)
+                dist_history[pair].append(dist)
+
+                history = dist_history[pair]
+                dist_std = (
+                    math.sqrt(sum((d - sum(history) / len(history)) ** 2 for d in history) / len(history))
+                    if len(history) > 1 else 0.0
+                )
+                proximity_streak = sum(1 for d in history if d < PROXIMITY_THRESHOLD) / len(history)
 
                 same_group = int(
                     di["group_id"] is not None
@@ -81,17 +120,23 @@ def extract(frames_dir: Path, output_path: Path):
                 )
 
                 rows.append({
-                    "frame":         frame_name,
-                    "person_i":      pid_i,
-                    "person_j":      pid_j,
-                    "distance":      round(dist, 2),
-                    "delta_distance": round(delta, 2),
-                    "same_group":    same_group,
+                    "frame":              frame_name,
+                    "person_i":           pid_i,
+                    "person_j":           pid_j,
+                    "distance":           round(dist, 2),
+                    "delta_distance":     round(delta, 2),
+                    "velocity_alignment": round(vel_align, 4),
+                    "dist_std":           round(dist_std, 2),
+                    "proximity_streak":   round(proximity_streak, 4),
+                    "same_group":         same_group,
                 })
 
     with open(output_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["frame", "person_i", "person_j",
-                                               "distance", "delta_distance", "same_group"])
+        writer = csv.DictWriter(f, fieldnames=[
+            "frame", "person_i", "person_j",
+            "distance", "delta_distance", "velocity_alignment", "dist_std", "proximity_streak",
+            "same_group",
+        ])
         writer.writeheader()
         writer.writerows(rows)
 

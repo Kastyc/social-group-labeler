@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import pickle
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -26,6 +27,9 @@ import numpy as np
 FEATURES_CSV   = "features.csv"
 MODEL_PATH     = "group_classifier.pkl"
 DETECTIONS     = "frames/detections_cache.json"
+PROXIMITY_THRESHOLD = 200  # pixels
+WINDOW = 5                 # frames for rolling features
+
 PALETTE = [
     (117, 117, 117),  # grey  — unassigned
     ( 57,  87, 229),  # blue
@@ -50,11 +54,38 @@ def bbox_center(bbox):
     return x + w / 2, y + h / 2
 
 
-def pairwise_features(persons: list[dict], prev_dists: dict) -> tuple[np.ndarray, list]:
-    """Return feature matrix and list of (pid_i, pid_j) pairs."""
+def _velocity_alignment(v1, v2):
+    mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
+    mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
+    if mag1 == 0 or mag2 == 0:
+        return 0.0
+    return (v1[0] * v2[0] + v1[1] * v2[1]) / (mag1 * mag2)
+
+
+def pairwise_features(persons: list[dict], state: dict) -> tuple[np.ndarray, list]:
+    """Return feature matrix and list of (pid_i, pid_j) pairs.
+
+    state is a mutable dict with keys:
+      prev_dists, prev_centers, dist_history
+    """
+    prev_dists = state.setdefault("prev_dists", {})
+    prev_centers = state.setdefault("prev_centers", {})
+    dist_history = state.setdefault("dist_history", {})
+
     rows, pairs = [], []
     pids = [p["person_id"] for p in persons]
     centers = {p["person_id"]: bbox_center(p["bbox"]) for p in persons}
+
+    # Compute velocities
+    velocities = {}
+    for pid, center in centers.items():
+        cx, cy = center
+        if pid in prev_centers:
+            px, py = prev_centers[pid]
+            velocities[pid] = (cx - px, cy - py)
+        else:
+            velocities[pid] = (0.0, 0.0)
+        prev_centers[pid] = (cx, cy)
 
     for a in range(len(pids)):
         for b in range(a + 1, len(pids)):
@@ -62,12 +93,27 @@ def pairwise_features(persons: list[dict], prev_dists: dict) -> tuple[np.ndarray
             ci, cj = centers[i], centers[j]
             dist = math.sqrt((ci[0] - cj[0]) ** 2 + (ci[1] - cj[1]) ** 2)
             key = (min(i, j), max(i, j))
+
             delta = dist - prev_dists.get(key, dist)
             prev_dists[key] = dist
-            rows.append([dist, delta])
+
+            vel_align = _velocity_alignment(velocities[i], velocities[j])
+
+            if key not in dist_history:
+                dist_history[key] = deque(maxlen=WINDOW)
+            dist_history[key].append(dist)
+            history = dist_history[key]
+            mean = sum(history) / len(history)
+            dist_std = (
+                math.sqrt(sum((d - mean) ** 2 for d in history) / len(history))
+                if len(history) > 1 else 0.0
+            )
+            proximity_streak = sum(1 for d in history if d < PROXIMITY_THRESHOLD) / len(history)
+
+            rows.append([dist, delta, vel_align, dist_std, proximity_streak])
             pairs.append((i, j))
 
-    return np.array(rows) if rows else np.empty((0, 2)), pairs
+    return np.array(rows) if rows else np.empty((0, 5)), pairs
 
 
 def connected_components(pids: list, same_group_pairs: list[tuple]) -> dict:
@@ -136,14 +182,21 @@ def train():
     rows = []
     with open(FEATURES_CSV) as f:
         for row in csv.DictReader(f):
-            rows.append([float(row["distance"]), float(row["delta_distance"]), int(row["same_group"])])
+            rows.append([
+                float(row["distance"]),
+                float(row["delta_distance"]),
+                float(row["velocity_alignment"]),
+                float(row["dist_std"]),
+                float(row["proximity_streak"]),
+                int(row["same_group"]),
+            ])
 
     if not rows:
         print("features.csv is empty — run extract_features.py first.")
         return
 
     data = np.array(rows)
-    X, y = data[:, :2], data[:, 2]
+    X, y = data[:, :5], data[:, 5]
     print(f"Dataset: {len(X)} pairs  |  positives: {int(y.sum())}  negatives: {int((1-y).sum())}")
 
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
@@ -163,7 +216,7 @@ def train():
 # ── Predict ──────────────────────────────────────────────────────────────────
 
 
-def predict_frame(image_path: str, clf, detections: dict, prev_dists: dict) -> np.ndarray:
+def predict_frame(image_path: str, clf, detections: dict, state: dict) -> np.ndarray:
     name = Path(image_path).name
     persons = detections.get(name, [])
 
@@ -171,7 +224,7 @@ def predict_frame(image_path: str, clf, detections: dict, prev_dists: dict) -> n
         print(f"No detections for {name}")
         return cv2.imread(image_path)
 
-    X, pairs = pairwise_features(persons, prev_dists)
+    X, pairs = pairwise_features(persons, state)
 
     if len(X) == 0:
         group_map = {p["person_id"]: 1 for p in persons}
@@ -207,10 +260,10 @@ def predict_all(output_dir: str):
 
     frames_dir = Path("frames")
     frame_files = sorted(frames_dir.glob("*.png")) + sorted(frames_dir.glob("*.jpg"))
-    prev_dists: dict = {}
+    state: dict = {}
 
     for i, frame_path in enumerate(frame_files):
-        result = predict_frame(str(frame_path), clf, detections, prev_dists)
+        result = predict_frame(str(frame_path), clf, detections, state)
         cv2.imwrite(str(out_path / frame_path.name), result)
         if (i + 1) % 20 == 0:
             print(f"  {i + 1} / {len(frame_files)} frames done")
