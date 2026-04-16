@@ -16,3 +16,8 @@ __pycache__/
 
 # YOLO weights
 *.pt
+features*.csv
+frames/annotations.json
+frames/detections_cache.json
+group_classifier.pkl
+predictions/
