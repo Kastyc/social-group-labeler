@@ -41,7 +41,7 @@ def velocity_alignment(v1, v2):
     return (v1[0] * v2[0] + v1[1] * v2[1]) / (mag1 * mag2)
 
 
-def extract(frames_dir: Path, output_path: Path):
+def extract(frames_dir: Path, output_path: Path, append: bool = False):
     det_file = frames_dir / "detections_cache.json"
     ann_file = frames_dir / "annotations.json"
 
@@ -131,13 +131,16 @@ def extract(frames_dir: Path, output_path: Path):
                     "same_group":         same_group,
                 })
 
-    with open(output_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=[
-            "frame", "person_i", "person_j",
-            "distance", "delta_distance", "velocity_alignment", "dist_std", "proximity_streak",
-            "same_group",
-        ])
-        writer.writeheader()
+    fieldnames = [
+        "frame", "person_i", "person_j",
+        "distance", "delta_distance", "velocity_alignment", "dist_std", "proximity_streak",
+        "same_group",
+    ]
+    mode = "a" if append and output_path.exists() else "w"
+    with open(output_path, mode, newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if mode == "w":
+            writer.writeheader()
         writer.writerows(rows)
 
     total = len(rows)
@@ -151,6 +154,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--frames-dir", default="frames", help="Directory with detections_cache.json and annotations.json")
     parser.add_argument("--output", default="features.csv", help="Output CSV path")
+    parser.add_argument("--append", action="store_true", help="Append to existing CSV instead of overwriting")
     args = parser.parse_args()
 
-    extract(Path(args.frames_dir), Path(args.output))
+    extract(Path(args.frames_dir), Path(args.output), append=args.append)

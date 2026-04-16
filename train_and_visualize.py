@@ -173,14 +173,10 @@ def draw_predictions(image_path: str, persons: list[dict], group_map: dict) -> n
 # ── Train ────────────────────────────────────────────────────────────────────
 
 
-def train():
+def load_features(csv_path):
     import csv
-    from sklearn.ensemble import RandomForestClassifier
-    from sklearn.model_selection import train_test_split
-    from sklearn.metrics import classification_report
-
     rows = []
-    with open(FEATURES_CSV) as f:
+    with open(csv_path) as f:
         for row in csv.DictReader(f):
             rows.append([
                 float(row["distance"]),
@@ -190,23 +186,44 @@ def train():
                 float(row["proximity_streak"]),
                 int(row["same_group"]),
             ])
+    return np.array(rows) if rows else np.empty((0, 6))
 
-    if not rows:
+
+def train(eval_csv=None):
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import classification_report
+
+    data = load_features(FEATURES_CSV)
+    if len(data) == 0:
         print("features.csv is empty — run extract_features.py first.")
         return
 
-    data = np.array(rows)
     X, y = data[:, :5], data[:, 5]
-    print(f"Dataset: {len(X)} pairs  |  positives: {int(y.sum())}  negatives: {int((1-y).sum())}")
-
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    print(f"Training set: {len(X)} pairs  |  positives: {int(y.sum())}  negatives: {int((1-y).sum())}")
 
     clf = RandomForestClassifier(n_estimators=100, class_weight="balanced", random_state=42)
-    clf.fit(X_train, y_train)
 
-    y_pred = clf.predict(X_test)
-    print("\nTest set results:")
-    print(classification_report(y_test, y_pred, target_names=["diff group", "same group"]))
+    if eval_csv:
+        # Train on all training data, evaluate on holdout bag
+        clf.fit(X, y)
+
+        eval_data = load_features(eval_csv)
+        if len(eval_data) == 0:
+            print(f"Holdout CSV {eval_csv} is empty.")
+        else:
+            X_eval, y_eval = eval_data[:, :5], eval_data[:, 5]
+            print(f"Holdout set:  {len(X_eval)} pairs  |  positives: {int(y_eval.sum())}  negatives: {int((1-y_eval).sum())}")
+            y_pred = clf.predict(X_eval)
+            print("\nHoldout bag F1:")
+            print(classification_report(y_eval, y_pred, target_names=["diff group", "same group"]))
+    else:
+        # No holdout — fall back to random 80/20 split (less reliable)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        clf.fit(X_train, y_train)
+        y_pred = clf.predict(X_test)
+        print("\nRandom 80/20 split results (use --eval-csv for a proper holdout):")
+        print(classification_report(y_test, y_pred, target_names=["diff group", "same group"]))
 
     with open(MODEL_PATH, "wb") as f:
         pickle.dump(clf, f)
@@ -280,10 +297,11 @@ if __name__ == "__main__":
     group.add_argument("--train",       action="store_true", help="Train the classifier")
     group.add_argument("--predict",     metavar="FRAME",     help="Predict on a single frame")
     group.add_argument("--predict-all", metavar="OUTPUT_DIR",help="Predict on all frames")
+    parser.add_argument("--eval-csv",   metavar="CSV",       help="Holdout bag features CSV for F1 evaluation (use with --train)")
     args = parser.parse_args()
 
     if args.train:
-        train()
+        train(eval_csv=args.eval_csv)
     elif args.predict:
         predict_one(args.predict)
     elif args.predict_all:

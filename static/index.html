@@ -40,6 +40,7 @@ body {
 #toolbar button:hover { background: #333; color: #fff; }
 #toolbar button.primary { border-color: #4caf50; color: #4caf50; }
 #toolbar button.primary:hover { background: #4caf50; color: #000; }
+#toolbar button.active { border-color: #fb8c00; color: #fb8c00; background: #1a1200; }
 
 #frame-label { font-size: 12px; color: #888; min-width: 180px; }
 #status-msg  { font-size: 12px; color: #aaa; margin-left: auto; }
@@ -164,6 +165,7 @@ body {
   <button onclick="nextFrame()" title="→ or D">Next ▶</button>
   <button onclick="newGroup()"  title="N">＋ New Group</button>
   <button onclick="clearFrame()" title="C">Clear Frame</button>
+  <button id="btn-draw" onclick="toggleDrawMode()" title="B">Draw Box</button>
   <button onclick="saveAnnotations()" class="primary" title="S">Save</button>
   <span id="status-msg"></span>
 </div>
@@ -185,6 +187,7 @@ body {
       N &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; new group<br>
       1–9 &nbsp;&nbsp;&nbsp; select group<br>
       C &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; clear frame<br>
+      B &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; draw box mode<br>
       S &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; save
     </div>
   </div>
@@ -224,6 +227,11 @@ let nextGroupId = 2;    // next fresh group id
 
 let scale   = 1;        // canvas ↔ image scale
 let curImg  = null;     // current HTMLImageElement
+
+let drawMode    = false; // manual bounding box draw mode
+let manualCount = 0;     // counter for unique manual person ids
+let dragStart   = null;  // {cx, cy} canvas coords on mousedown
+let dragCurrent = null;  // {cx, cy} canvas coords during drag
 
 const canvas   = document.getElementById('canvas');
 const ctx      = canvas.getContext('2d');
@@ -288,6 +296,10 @@ async function loadFrame(idx) {
   labelEl.textContent = `Frame ${idx + 1} / ${frames.length}   •   ${name}`;
 
   curImg = await loadImage(`/api/frame/${encodeURIComponent(name)}`);
+
+  // Reset any in-progress draw drag on frame change
+  dragStart = null;
+  dragCurrent = null;
 
   initAnnotations(name);
   recalcNextGroupId();
@@ -410,11 +422,75 @@ function redraw() {
   }
 }
 
-// ─── Canvas click ────────────────────────────────────────────────────────────
-canvas.addEventListener('click', e => {
+// ─── Canvas click / draw ─────────────────────────────────────────────────────
+function canvasCoords(e) {
   const rect = canvas.getBoundingClientRect();
-  const cx = (e.clientX - rect.left) * (canvas.width  / rect.width);
-  const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
+  return {
+    cx: (e.clientX - rect.left) * (canvas.width  / rect.width),
+    cy: (e.clientY - rect.top)  * (canvas.height / rect.height),
+  };
+}
+
+canvas.addEventListener('mousedown', e => {
+  if (!drawMode) return;
+  e.preventDefault();
+  dragStart = canvasCoords(e);
+  dragCurrent = { ...dragStart };
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!drawMode || !dragStart) return;
+  e.preventDefault();
+  dragCurrent = canvasCoords(e);
+  // Live preview
+  redraw();
+  const x1 = Math.min(dragStart.cx, dragCurrent.cx);
+  const y1 = Math.min(dragStart.cy, dragCurrent.cy);
+  const w  = Math.abs(dragCurrent.cx - dragStart.cx);
+  const h  = Math.abs(dragCurrent.cy - dragStart.cy);
+  ctx.strokeStyle = gColor(curGroup);
+  ctx.lineWidth   = 2;
+  ctx.setLineDash([6, 3]);
+  ctx.strokeRect(x1, y1, w, h);
+  ctx.setLineDash([]);
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (!drawMode || !dragStart) return;
+  e.preventDefault();
+  const end = canvasCoords(e);
+
+  const x1 = Math.min(dragStart.cx, end.cx) / scale;
+  const y1 = Math.min(dragStart.cy, end.cy) / scale;
+  const w  = Math.abs(end.cx - dragStart.cx) / scale;
+  const h  = Math.abs(end.cy - dragStart.cy) / scale;
+
+  dragStart = null;
+  dragCurrent = null;
+
+  if (w < 5 || h < 5) { redraw(); return; }  // ignore tiny drags
+
+  const name = frames[curIdx];
+  manualCount++;
+  const newPerson = {
+    person_id: `manual_${manualCount}`,
+    bbox:      [x1, y1, w, h],
+    mask:      null,
+    group_id:  curGroup,
+  };
+  if (curGroup >= nextGroupId) nextGroupId = curGroup + 1;
+  annotations[name] = annotations[name] || [];
+  annotations[name].push(newPerson);
+
+  redraw();
+  renderSidebar();
+  flash(`Manual box added → G${curGroup}`);
+});
+
+canvas.addEventListener('click', e => {
+  if (drawMode) return;  // draw mode handles its own events
+
+  const { cx, cy } = canvasCoords(e);
   const ix = cx / scale, iy = cy / scale;
 
   const persons = annotations[frames[curIdx]] || [];
@@ -440,6 +516,16 @@ canvas.addEventListener('click', e => {
   redraw();
   renderSidebar();
 });
+
+// ─── Draw mode toggle ─────────────────────────────────────────────────────────
+function toggleDrawMode() {
+  drawMode = !drawMode;
+  dragStart = null;
+  dragCurrent = null;
+  canvas.style.cursor = drawMode ? 'crosshair' : 'default';
+  document.getElementById('btn-draw').classList.toggle('active', drawMode);
+  flash(drawMode ? 'Draw mode ON — drag to create box' : 'Draw mode OFF');
+}
 
 // ─── Controls ────────────────────────────────────────────────────────────────
 function prevFrame() { if (curIdx > 0) loadFrame(curIdx - 1); }
@@ -534,6 +620,7 @@ document.addEventListener('keydown', e => {
     case 'n': case 'N': newGroup();         break;
     case 's': case 'S': saveAnnotations(); break;
     case 'c': case 'C': clearFrame();      break;
+    case 'b': case 'B': toggleDrawMode(); break;
     default:
       if (e.key >= '1' && e.key <= '9') selectGroup(parseInt(e.key));
   }
